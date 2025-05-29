@@ -56,29 +56,6 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     return (message as any)._id || (message as any).id || '';
   };
 
-  // Typing indicator debounce
-  useEffect(() => {
-    if (!socket) return;
-    
-    let typingTimer: NodeJS.Timeout;
-    
-    if (isTyping) {
-      socket.emit("typing", { userId: currentUser?.userId, isTyping: true });
-      
-      // Clear the typing indicator after 2 seconds of no typing
-      typingTimer = setTimeout(() => {
-        setIsTyping(false);
-        socket.emit("typing", { userId: currentUser?.userId, isTyping: false });
-      }, 2000);
-    } else {
-      socket.emit("typing", { userId: currentUser?.userId, isTyping: false });
-    }
-    
-    return () => {
-      clearTimeout(typingTimer);
-    };
-  }, [isTyping, socket, currentUser]);
-
   // Initialize user data from localStorage
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -103,57 +80,101 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           name: otherUserName,
           online: false, // We'll update this via socket
         });
+      }
+    }
+  }, []);
+
+  // Initialize Socket.IO connection with better error handling
+  useEffect(() => {
+    if (!currentUser) return;
+    
+    let socketInstance: Socket | null = null;
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 5;
+    const reconnectDelay = 2000; // 2 seconds
+    
+    const connectSocket = () => {
+      try {
+        // Initialize socket connection directly without the fetch call
+        socketInstance = io({
+          path: '/api/socket',
+          transports: ['websocket', 'polling'], // Fallback to polling if websocket fails
+          timeout: 10000, // 10 second timeout
+          reconnection: true,
+          reconnectionAttempts: maxReconnectAttempts,
+          reconnectionDelay: reconnectDelay,
+        });
         
-        // Update user status to online
+        socketInstance.on('connect', () => {
+          console.log('Socket connected successfully!');
+          reconnectAttempts = 0; // Reset attempts on successful connection
+          setError(null); // Clear any previous errors
+          
+          // Join chat room and update status
+          socketInstance?.emit('join-chat', currentUser.userId);
+          
+          // Update user status to online
+          fetch('/api/user-status', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ userId: currentUser.userId, status: 'online' }),
+          }).catch(err => console.error('Failed to update user status:', err));
+        });
+        
+        socketInstance.on('disconnect', (reason) => {
+          console.log('Socket disconnected:', reason);
+          if (reason === 'io server disconnect') {
+            // Server initiated disconnect, try to reconnect
+            socketInstance?.connect();
+          }
+        });
+        
+        socketInstance.on('connect_error', (err) => {
+          console.error('Socket connection error:', err);
+          reconnectAttempts++;
+          
+          if (reconnectAttempts >= maxReconnectAttempts) {
+            setError('Unable to connect to chat server. Please check your internet connection and refresh the page.');
+            toast({
+              variant: "destructive",
+              title: "Connection Error",
+              description: "Unable to connect to chat server. Please refresh the page.",
+            });
+          }
+        });
+        
+        socketInstance.on('reconnect', (attemptNumber) => {
+          console.log('Socket reconnected after', attemptNumber, 'attempts');
+          toast({
+            title: "Reconnected",
+            description: "Connection to chat server restored.",
+          });
+        });
+        
+        setSocket(socketInstance);
+        
+      } catch (err) {
+        console.error('Error initializing socket:', err);
+        setError('Failed to initialize chat connection.');
+      }
+    };
+    
+    // Initialize socket connection
+    connectSocket();
+    
+    return () => {
+      if (socketInstance) {
+        // Update status to offline before disconnecting
         fetch('/api/user-status', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ userId, status: 'online' }),
-        }).catch(err => console.error('Failed to update user status:', err));
-      }
-    }
-  }, []);
-
-  // Initialize Socket.IO connection
-  useEffect(() => {
-    if (!currentUser) return;
-    
-    const initializeSocket = async () => {
-      // Initialize the socket
-      await fetch('/api/socket');
-      
-      const socketInstance = io({
-        path: '/api/socket',
-      });
-      
-      socketInstance.on('connect', () => {
-        console.log('Socket connected!');
-        socketInstance.emit('join-chat', currentUser.userId);
-      });
-      
-      socketInstance.on('connect_error', (err) => {
-        console.error('Socket connection error:', err);
-        toast({
-          variant: "destructive",
-          title: "Connection Error",
-          description: "Failed to connect to chat server. Please refresh.",
-        });
-      });
-      
-      setSocket(socketInstance);
-      
-      return socketInstance;
-    };
-    
-    let socketInstance: Socket;
-    initializeSocket().then(instance => {
-      if (instance) socketInstance = instance;
-    });
-    
-    return () => {
-      if (socketInstance) {
+          body: JSON.stringify({ userId: currentUser.userId, status: 'offline' }),
+        }).catch(err => console.error('Failed to update offline status:', err));
+        
         socketInstance.disconnect();
       }
     };
@@ -164,7 +185,7 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     if (!socket || !currentUser) return;
     
     // Handle new messages
-    socket.on('receive-message', (message: IMessage) => {
+    const handleReceiveMessage = (message: IMessage) => {
       setMessages(prev => [...prev, message]);
       
       // If the message is from the other user, mark as read
@@ -174,27 +195,29 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           markAsRead([messageId]);
         }
       }
-    });
+    };
     
     // Handle user status updates
-    socket.on('user-status', ({ userId, status }: { userId: string, status: 'online' | 'offline' }) => {
+    const handleUserStatus = ({ userId, status }: { userId: string, status: 'online' | 'offline' }) => {
+      console.log('User status update:', userId, status); // Debug log
       if (userId === otherUser?.userId) {
         setOtherUser(prev => prev ? {
           ...prev,
           online: status === 'online',
+          lastSeen: status === 'offline' ? new Date() : prev.lastSeen,
         } : null);
       }
-    });
+    };
     
     // Handle typing indicators
-    socket.on('user-typing', ({ userId, isTyping }: { userId: string, isTyping: boolean }) => {
+    const handleUserTyping = ({ userId, isTyping }: { userId: string, isTyping: boolean }) => {
       if (userId === otherUser?.userId) {
         setOtherUserTyping(isTyping);
       }
-    });
+    };
     
     // Handle read receipts
-    socket.on('messages-read', ({ userId, messageIds }: { userId: string, messageIds: string[] }) => {
+    const handleMessagesRead = ({ userId, messageIds }: { userId: string, messageIds: string[] }) => {
       if (userId === otherUser?.userId) {
         setMessages(prevMessages => 
           prevMessages.map(msg => {
@@ -205,15 +228,47 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           })
         );
       }
-    });
+    };
+    
+    // Add event listeners
+    socket.on('receive-message', handleReceiveMessage);
+    socket.on('user-status', handleUserStatus);
+    socket.on('user-typing', handleUserTyping);
+    socket.on('messages-read', handleMessagesRead);
+    
+    // Request current user statuses when socket connects
+    socket.emit('get-user-status', otherUser?.userId);
     
     return () => {
-      socket.off('receive-message');
-      socket.off('user-status');
-      socket.off('user-typing');
-      socket.off('messages-read');
+      socket.off('receive-message', handleReceiveMessage);
+      socket.off('user-status', handleUserStatus);
+      socket.off('user-typing', handleUserTyping);
+      socket.off('messages-read', handleMessagesRead);
     };
   }, [socket, currentUser, otherUser]);
+
+  // Typing indicator debounce
+  useEffect(() => {
+    if (!socket || !currentUser) return;
+    
+    let typingTimer: NodeJS.Timeout;
+    
+    if (isTyping) {
+      socket.emit("typing", { userId: currentUser.userId, isTyping: true });
+      
+      // Clear the typing indicator after 2 seconds of no typing
+      typingTimer = setTimeout(() => {
+        setIsTyping(false);
+        socket.emit("typing", { userId: currentUser.userId, isTyping: false });
+      }, 2000);
+    } else {
+      socket.emit("typing", { userId: currentUser.userId, isTyping: false });
+    }
+    
+    return () => {
+      clearTimeout(typingTimer);
+    };
+  }, [isTyping, socket, currentUser]);
 
   // Load all messages
   useEffect(() => {
@@ -333,35 +388,56 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   // Update online status when window loses/gains focus
   useEffect(() => {
-    if (!currentUser) return;
+    if (!currentUser || !socket) return;
     
     const handleVisibilityChange = () => {
-      if (!document.hidden) {
-        // User came back - set online
-        fetch('/api/user-status', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ userId: currentUser.userId, status: 'online' }),
-        }).catch(err => console.error('Failed to update online status:', err));
-      }
+      const status = document.hidden ? 'offline' : 'online';
+      
+      // Update via API
+      fetch('/api/user-status', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ userId: currentUser.userId, status }),
+      }).catch(err => console.error('Failed to update user status:', err));
+      
+      // Also emit via socket for real-time updates
+      socket.emit('user-status-change', { userId: currentUser.userId, status });
     };
     
-    window.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('focus', handleVisibilityChange);
+    const handleFocus = () => {
+      fetch('/api/user-status', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ userId: currentUser.userId, status: 'online' }),
+      }).catch(err => console.error('Failed to update online status:', err));
+      
+      socket.emit('user-status-change', { userId: currentUser.userId, status: 'online' });
+    };
+    
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
     
     return () => {
-      window.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('focus', handleVisibilityChange);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
     };
-  }, [currentUser]);
+  }, [currentUser, socket]);
 
   // Set offline status when leaving
   useEffect(() => {
     if (!currentUser) return;
     
     const handleBeforeUnload = () => {
+      // Update via socket first (faster)
+      if (socket) {
+        socket.emit('user-status-change', { userId: currentUser.userId, status: 'offline' });
+      }
+      
+      // Fallback API call
       navigator.sendBeacon(
         '/api/user-status',
         JSON.stringify({ userId: currentUser.userId, status: 'offline' })
@@ -373,7 +449,7 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);
     };
-  }, [currentUser]);
+  }, [currentUser, socket]);
 
   const contextValue = {
     messages,
