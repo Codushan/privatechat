@@ -164,7 +164,7 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       
       // If the message is from the other user, mark as read
       if (message.sender !== currentUser.userId) {
-        markAsRead([message._id]);
+        markAsRead([message._id.toString()]);
       }
     });
     
