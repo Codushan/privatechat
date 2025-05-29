@@ -51,6 +51,11 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [otherUserTyping, setOtherUserTyping] = useState(false);
   const { toast } = useToast();
 
+  // Helper function to get message ID - handles both _id and id properties
+  const getMessageId = (message: IMessage): string => {
+    return (message as any)._id || (message as any).id || '';
+  };
+
   // Typing indicator debounce
   useEffect(() => {
     if (!socket) return;
@@ -164,7 +169,10 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       
       // If the message is from the other user, mark as read
       if (message.sender !== currentUser.userId) {
-        markAsRead([message._id.toString()]);
+        const messageId = getMessageId(message);
+        if (messageId) {
+          markAsRead([messageId]);
+        }
       }
     });
     
@@ -189,9 +197,12 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     socket.on('messages-read', ({ userId, messageIds }: { userId: string, messageIds: string[] }) => {
       if (userId === otherUser?.userId) {
         setMessages(prevMessages => 
-          prevMessages.map(msg => 
-            messageIds.includes(msg._id) ? { ...msg, read: true } : msg
-          )
+          prevMessages.map(msg => {
+            const msgId = getMessageId(msg);
+            return messageIds.includes(msgId)
+              ? { ...msg, read: true } as IMessage
+              : msg;
+          })
         );
       }
     });
@@ -243,9 +254,10 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     try {
       // Update messages locally
       setMessages(prevMessages => 
-        prevMessages.map(msg => 
-          messageIds.includes(msg._id) ? { ...msg, read: true } : msg
-        )
+        prevMessages.map(msg => {
+          const msgId = getMessageId(msg);
+          return messageIds.includes(msgId) ? { ...msg, read: true } : msg;
+        })
       );
       
       // Emit read status to other user
