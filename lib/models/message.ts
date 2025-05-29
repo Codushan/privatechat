@@ -1,7 +1,7 @@
-import mongoose from 'mongoose';
+import mongoose, { Document, Types } from 'mongoose';
 
-export interface IMessage {
-  _id: number;
+export interface IMessage extends Document {
+  _id: Types.ObjectId; // accurate for MongoDB
   sender: string;
   content: string;
   contentType: 'text' | 'image' | 'video' | 'document' | 'gif' | 'sticker';
