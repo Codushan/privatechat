@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 
 export interface IMessage {
-  _id: string;
+  _id: number;
   sender: string;
   content: string;
   contentType: 'text' | 'image' | 'video' | 'document' | 'gif' | 'sticker';
